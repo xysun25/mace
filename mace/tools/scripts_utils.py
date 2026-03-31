@@ -34,6 +34,8 @@ class SubsetCollection:
 def log_dataset_contents(dataset: data.Configurations, dataset_name: str) -> None:
     log_string = f"{dataset_name} ["
     for prop_name in dataset[0].properties.keys():
+        if prop_name not in dataset[0].property_weights:
+            continue
         if prop_name == "dipole":
             log_string += f"{prop_name} components: {int(np.sum([np.sum(config.property_weights[prop_name]) for config in dataset]))}, "
         else:
