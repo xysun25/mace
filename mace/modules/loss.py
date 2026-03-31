@@ -453,10 +453,15 @@ class UniversalLoss(torch.nn.Module):
         configs_forces_weight = torch.repeat_interleave(
             ref.forces_weight, ref.ptr[1:] - ref.ptr[:-1]
         ).unsqueeze(-1)
+        # Apply per-atom force weight if available
+        if hasattr(ref, "atom_forces_weight") and ref.atom_forces_weight is not None:
+            atom_forces_weight = ref.atom_forces_weight  # [n_atoms, 1]
+        else:
+            atom_forces_weight = torch.ones_like(configs_forces_weight)
         # Apply fixed atom mask: exclude constrained atoms from force loss
         free_mask = _get_free_atom_mask(ref)
-        weighted_ref_forces = configs_forces_weight * ref["forces"]
-        weighted_pred_forces = configs_forces_weight * pred["forces"]
+        weighted_ref_forces = configs_forces_weight * atom_forces_weight * ref["forces"]
+        weighted_pred_forces = configs_forces_weight * atom_forces_weight * pred["forces"]
         if free_mask is not None:
             weighted_ref_forces = weighted_ref_forces[free_mask]
             weighted_pred_forces = weighted_pred_forces[free_mask]
