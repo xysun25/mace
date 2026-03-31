@@ -440,6 +440,17 @@ class AtomicData(torch_geometric.data.Data):
         else:
             cls_kwargs["fixed"] = torch.zeros(num_atoms, dtype=torch.long)
 
+        # Explicitly handle per-atom force weight: store as [n_atoms, 1] tensor.
+        # Default to 1.0 for all atoms if not present (e.g. pt_head replay data).
+        if config.properties.get("atom_forces_weight") is not None:
+            cls_kwargs["atom_forces_weight"] = torch.tensor(
+                config.properties["atom_forces_weight"], dtype=torch.get_default_dtype()
+            ).unsqueeze(-1)
+        else:
+            cls_kwargs["atom_forces_weight"] = torch.ones(
+                num_atoms, 1, dtype=torch.get_default_dtype()
+            )
+
         # Pass through any extra properties not already handled above.
         for k, v in config.properties.items():
             if k in cls_kwargs or v is None or isinstance(v, (str, bytes)):
