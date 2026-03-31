@@ -430,6 +430,16 @@ class AtomicData(torch_geometric.data.Data):
             external_field=external_field,
         )
 
+        # Explicitly handle fixed atoms mask: store as [n_atoms] long tensor
+        # (1=fixed/constrained, 0=free). This must be added before the generic loop
+        # below so it is not subject to the automatic unsqueeze(-1) reshaping.
+        if config.properties.get("fixed") is not None:
+            cls_kwargs["fixed"] = torch.tensor(
+                config.properties["fixed"], dtype=torch.long
+            )
+        else:
+            cls_kwargs["fixed"] = torch.zeros(num_atoms, dtype=torch.long)
+
         # Pass through any extra properties not already handled above.
         for k, v in config.properties.items():
             if k in cls_kwargs or v is None or isinstance(v, (str, bytes)):

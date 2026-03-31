@@ -209,6 +209,11 @@ def config_from_atoms(
     if fixed is not None:
         properties["fixed"] = np.array(fixed, dtype=np.int32)
 
+    # Read per-atom force weight if present
+    atom_forces_weight = atoms.arrays.get("atom_forces_weight", None)
+    if atom_forces_weight is not None:
+        properties["atom_forces_weight"] = np.array(atom_forces_weight, dtype=np.float64)
+
     return Configuration(
         atomic_numbers=atomic_numbers,
         positions=atoms.get_positions(),
