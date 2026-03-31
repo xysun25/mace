@@ -633,15 +633,32 @@ class MACELoss(Metric):
                 batch, self.delta_es, batch.weight, batch.energy_weight
             )
         if output.get("forces") is not None and batch.forces is not None:
-            self.fs.append(batch.forces)
-            self.delta_fs.append(batch.forces - output["forces"])
-            self.Fs_computed += filter_nonzero_weight(
-                batch,
-                self.delta_fs,
-                batch.weight,
-                batch.forces_weight,
-                spread_atoms=True,
-            )
+            has_fixed = hasattr(batch, "fixed") and batch.fixed is not None
+            if has_fixed:
+                # Only include free (non-fixed) atoms in force metrics
+                fixed = batch.fixed
+                if fixed.dim() > 1:
+                    fixed = fixed.squeeze(-1)
+                free_mask = fixed == 0  # [n_atoms]
+                ref_forces = batch.forces[free_mask]
+                pred_forces = output["forces"][free_mask]
+                self.fs.append(ref_forces.reshape(-1))
+                self.delta_fs.append((ref_forces - pred_forces).reshape(-1))
+                if ref_forces.numel() > 0:
+                    self.Fs_computed += 1.0
+                else:
+                    self.delta_fs.pop()
+                    self.fs.pop()
+            else:
+                self.fs.append(batch.forces)
+                self.delta_fs.append(batch.forces - output["forces"])
+                self.Fs_computed += filter_nonzero_weight(
+                    batch,
+                    self.delta_fs,
+                    batch.weight,
+                    batch.forces_weight,
+                    spread_atoms=True,
+                )
         if output.get("stress") is not None and batch.stress is not None:
             self.delta_stress.append(batch.stress - output["stress"])
             self.stress_computed += filter_nonzero_weight(

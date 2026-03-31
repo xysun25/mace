@@ -204,6 +204,11 @@ def config_from_atoms(
         if not atoms_key in atoms.arrays:
             property_weights[name] = 0.0
 
+    # Read fixed atoms mask (1=fixed/constrained, 0=free) if present in the dataset
+    fixed = atoms.arrays.get("fixed", None)
+    if fixed is not None:
+        properties["fixed"] = np.array(fixed, dtype=np.int32)
+
     return Configuration(
         atomic_numbers=atomic_numbers,
         positions=atoms.get_positions(),
