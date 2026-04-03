@@ -222,8 +222,14 @@ def load_adsorption_system(
     )
 
     # ── Load adsorption structures ───────────────────────────────────────────
+    # Exclude the surface and gas directories in case ads_dir is their parent
+    exclude = {slab_dir.resolve(), gas_struct_dir.resolve()}
     opt_dirs = sorted(
-        [d for d in ads_dir.iterdir() if d.is_dir() and d.name.startswith("opt_")],
+        [
+            d for d in ads_dir.iterdir()
+            if d.is_dir() and d.name.startswith("opt_")
+            and d.resolve() not in exclude
+        ],
         key=lambda d: int(d.name.split("_")[1]),
     )
 
