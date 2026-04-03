@@ -172,6 +172,7 @@ def train(
     distributed_model: Optional[DistributedDataParallel] = None,
     train_sampler: Optional[DistributedSampler] = None,
     rank: Optional[int] = 0,
+    adsorption_benchmark_fn=None,
 ):
     lowest_loss = np.inf
     valid_loss = np.inf
@@ -290,6 +291,11 @@ def train(
                         plotter.plot(epoch, model_to_evaluate, rank)
                     except Exception as e:  # pylint: disable=broad-except
                         logging.debug(f"Plotting failed: {e}")
+                if adsorption_benchmark_fn is not None and rank == 0:
+                    try:
+                        adsorption_benchmark_fn(epoch, model_to_evaluate)
+                    except Exception as e:  # pylint: disable=broad-except
+                        logging.warning(f"Adsorption benchmark failed at epoch {epoch}: {e}")
                 valid_loss = (
                     valid_loss_head  # consider only the last head for the checkpoint
                 )

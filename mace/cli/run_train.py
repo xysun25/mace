@@ -73,6 +73,7 @@ from mace.tools.scripts_utils import (
     remove_pt_head,
     setup_wandb,
 )
+from mace.tools.adsorption_benchmark import make_adsorption_benchmark_fn
 from mace.tools.tables_utils import create_error_table
 from mace.tools.utils import AtomicNumberTable
 
@@ -939,6 +940,42 @@ def run(args) -> None:
                 "Please install it to use XPU device."
             )
 
+    # Build adsorption benchmark callback if requested
+    adsorption_benchmark_fn = None
+    if getattr(args, "adsorption_benchmark", False):
+        missing = [
+            name
+            for name, val in [
+                ("--adsorption_surface_dir", getattr(args, "adsorption_surface_dir", None)),
+                ("--adsorption_gas_dir", getattr(args, "adsorption_gas_dir", None)),
+                ("--adsorption_ads_dir", getattr(args, "adsorption_ads_dir", None)),
+            ]
+            if val is None
+        ]
+        if missing:
+            logging.warning(
+                f"Adsorption benchmark requested but required arguments are missing: "
+                f"{missing}. Benchmark will be disabled."
+            )
+        else:
+            ads_output_dir = getattr(args, "adsorption_output_dir", None)
+            if ads_output_dir is None:
+                ads_output_dir = str(
+                    Path(args.results_dir) / "adsorption_benchmark"
+                )
+            adsorption_benchmark_fn = make_adsorption_benchmark_fn(
+                surface_dir=args.adsorption_surface_dir,
+                gas_dir=args.adsorption_gas_dir,
+                ads_dir=args.adsorption_ads_dir,
+                output_dir=ads_output_dir,
+                device=getattr(args, "adsorption_benchmark_device", "cpu"),
+                fmax=getattr(args, "adsorption_fmax", 0.05),
+            )
+            if adsorption_benchmark_fn is not None:
+                logging.info(
+                    f"Adsorption benchmark enabled — results will be saved to {ads_output_dir}"
+                )
+
     tools.train(
         model=model,
         loss_fn=loss_fn,
@@ -965,6 +1002,7 @@ def run(args) -> None:
         plotter=plotter,
         train_sampler=train_sampler,
         rank=rank,
+        adsorption_benchmark_fn=adsorption_benchmark_fn,
     )
 
     logging.info("")

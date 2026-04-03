@@ -1093,6 +1093,55 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "forces_weight",
         ],
     )
+
+    # Adsorption energy benchmark (run after each eval_interval epochs)
+    parser.add_argument(
+        "--adsorption_benchmark",
+        help="Enable per-epoch adsorption energy benchmark",
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
+        "--adsorption_surface_dir",
+        help="Directory containing the clean slab CP2K output (*-pos-1.pdb) "
+             "for the adsorption benchmark",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--adsorption_gas_dir",
+        help="Directory containing the gas-phase molecule CP2K output "
+             "for the adsorption benchmark",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--adsorption_ads_dir",
+        help="Directory containing opt_* sub-directories with adsorption "
+             "structure CP2K outputs for the adsorption benchmark",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--adsorption_output_dir",
+        help="Directory to save per-epoch adsorption benchmark CSVs and plots. "
+             "Defaults to <results_dir>/adsorption_benchmark/",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--adsorption_fmax",
+        help="Force convergence criterion (eV/Å) for benchmark relaxation",
+        type=float,
+        default=0.05,
+    )
+    parser.add_argument(
+        "--adsorption_benchmark_device",
+        help="Device for adsorption benchmark calculations (default: cpu to avoid "
+             "conflicts with training GPU)",
+        type=str,
+        default="cpu",
+    )
     return parser
 
 
