@@ -943,38 +943,72 @@ def run(args) -> None:
     # Build adsorption benchmark callback if requested
     adsorption_benchmark_fn = None
     if getattr(args, "adsorption_benchmark", False):
-        missing = [
-            name
-            for name, val in [
-                ("--adsorption_surface_dir", getattr(args, "adsorption_surface_dir", None)),
-                ("--adsorption_gas_dir", getattr(args, "adsorption_gas_dir", None)),
-                ("--adsorption_ads_dir", getattr(args, "adsorption_ads_dir", None)),
-            ]
-            if val is None
-        ]
-        if missing:
-            logging.warning(
-                f"Adsorption benchmark requested but required arguments are missing: "
-                f"{missing}. Benchmark will be disabled."
-            )
+        ads_output_dir = getattr(args, "adsorption_output_dir", None)
+        if ads_output_dir is None:
+            ads_output_dir = str(Path(args.results_dir) / "adsorption_benchmark")
+
+        # Multi-system mode: JSON config file
+        config_path = getattr(args, "adsorption_benchmark_config", None)
+        if config_path is not None:
+            import json
+            try:
+                with open(config_path) as f:
+                    systems = json.load(f)
+                required_keys = {"name", "surface_dir", "gas_dir", "ads_dir"}
+                bad = [
+                    s.get("name", f"entry#{i}")
+                    for i, s in enumerate(systems)
+                    if not required_keys.issubset(s)
+                ]
+                if bad:
+                    logging.warning(
+                        f"Adsorption benchmark config: entries missing required keys "
+                        f"(name/surface_dir/gas_dir/ads_dir): {bad}. Benchmark will be disabled."
+                    )
+                else:
+                    adsorption_benchmark_fn = make_adsorption_benchmark_fn(
+                        systems=systems,
+                        output_dir=ads_output_dir,
+                        device=getattr(args, "adsorption_benchmark_device", "cpu"),
+                        fmax=getattr(args, "adsorption_fmax", 0.05),
+                    )
+            except Exception as exc:
+                logging.warning(
+                    f"Adsorption benchmark: failed to read config {config_path}: {exc}. "
+                    "Benchmark will be disabled."
+                )
         else:
-            ads_output_dir = getattr(args, "adsorption_output_dir", None)
-            if ads_output_dir is None:
-                ads_output_dir = str(
-                    Path(args.results_dir) / "adsorption_benchmark"
+            # Single-system (backward-compatible) mode
+            missing = [
+                name
+                for name, val in [
+                    ("--adsorption_surface_dir", getattr(args, "adsorption_surface_dir", None)),
+                    ("--adsorption_gas_dir", getattr(args, "adsorption_gas_dir", None)),
+                    ("--adsorption_ads_dir", getattr(args, "adsorption_ads_dir", None)),
+                ]
+                if val is None
+            ]
+            if missing:
+                logging.warning(
+                    f"Adsorption benchmark requested but required arguments are missing: "
+                    f"{missing}. Provide either --adsorption_benchmark_config (multi-system) "
+                    "or all three of --adsorption_surface_dir / --adsorption_gas_dir / "
+                    "--adsorption_ads_dir (single-system). Benchmark will be disabled."
                 )
-            adsorption_benchmark_fn = make_adsorption_benchmark_fn(
-                surface_dir=args.adsorption_surface_dir,
-                gas_dir=args.adsorption_gas_dir,
-                ads_dir=args.adsorption_ads_dir,
-                output_dir=ads_output_dir,
-                device=getattr(args, "adsorption_benchmark_device", "cpu"),
-                fmax=getattr(args, "adsorption_fmax", 0.05),
+            else:
+                adsorption_benchmark_fn = make_adsorption_benchmark_fn(
+                    surface_dir=args.adsorption_surface_dir,
+                    gas_dir=args.adsorption_gas_dir,
+                    ads_dir=args.adsorption_ads_dir,
+                    output_dir=ads_output_dir,
+                    device=getattr(args, "adsorption_benchmark_device", "cpu"),
+                    fmax=getattr(args, "adsorption_fmax", 0.05),
+                )
+
+        if adsorption_benchmark_fn is not None:
+            logging.info(
+                f"Adsorption benchmark enabled — results will be saved to {ads_output_dir}"
             )
-            if adsorption_benchmark_fn is not None:
-                logging.info(
-                    f"Adsorption benchmark enabled — results will be saved to {ads_output_dir}"
-                )
 
     tools.train(
         model=model,

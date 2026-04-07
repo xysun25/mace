@@ -328,6 +328,210 @@ AdsorptionBenchmark — Epoch 3  (8 combos)
 
 ---
 
+## 第三部分：多表面/多吸附质基准测试
+
+### 背景
+
+实际微调场景中往往涉及多种表面（100/111/211/stepped）和多种吸附质（CO、CO2、H 等）。
+原有基准测试只支持单一表面，无法同时对比各表面的预测精度。
+本次修改扩展为多系统模式，支持任意数量的表面与吸附质组合，每个系统独立输出结果，并提供跨系统汇总图表。
+
+### 修改的文件
+
+#### `mace/tools/adsorption_benchmark.py`
+
+**`make_adsorption_benchmark_fn` 新签名（向后兼容）：**
+
+```python
+def make_adsorption_benchmark_fn(
+    output_dir: str,
+    systems: Optional[List[Dict]] = None,   # 新增：多系统列表
+    surface_dir: Optional[str] = None,       # 旧式单系统（保留兼容）
+    gas_dir: Optional[str] = None,
+    ads_dir: Optional[str] = None,
+    device: str = "cpu",
+    fmax: float = 0.05,
+)
+```
+
+每个 `systems` 条目：
+
+```python
+{
+    "name": "CO/100",          # 显示在日志、文件名、图例中的标签
+    "surface_dir": "...",      # 清洁表面目录（含 *-pos-1.pdb）
+    "gas_dir": "...",          # 气体分子目录
+    "ads_dir": "...",          # 含 opt_* 子目录的根目录
+}
+```
+
+**新增 `save_multi_system_parity_plot()`：**
+
+在一张图上用不同颜色绘制各系统的 parity plot，标题显示全部系统的总体 MAE/RMSE。
+
+**每 epoch 输出结构变化：**
+
+```
+adsorption_benchmark/
+    CO_100/                                         ← 每系统独立子目录
+        adsorption_benchmark_epoch0001_slab-dft_gas-dft_sp.csv
+        adsorption_benchmark_epoch0001_slab-dft_gas-dft_sp.png
+        ...（8 对 CSV + PNG）
+        adsorption_benchmark_epoch0001_all.csv
+    CO_111/
+        ...
+    CO_211/
+        ...
+    CO_stepped/
+        ...
+    adsorption_benchmark_epoch0001_slab-dft_gas-dft_sp_all_systems.png   ← 跨系统对比图
+    adsorption_benchmark_epoch0001_slab-mlff_gas-mlff_sp_all_systems.png
+    ...（每种 combo 一张跨系统图）
+    adsorption_benchmark_epoch0001_all.csv                               ← 全系统全 combo 合并 CSV
+```
+
+#### `mace/tools/arg_parser.py`
+
+新增参数：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--adsorption_benchmark_config` | `None` | JSON 配置文件路径（多系统模式，优先于旧式三参数） |
+
+原有 7 个参数**保持不变**，单系统旧式写法仍然有效。
+
+#### `mace/cli/run_train.py`
+
+- 有 `--adsorption_benchmark_config` 时：读取 JSON 文件，校验每条目含 `name/surface_dir/gas_dir/ads_dir`，调用多系统模式
+- 无 `--adsorption_benchmark_config` 时：回退到原有单系统逻辑
+
+### JSON 配置文件格式
+
+```json
+[
+  {
+    "name": "CO/100",
+    "surface_dir": "/path/to/small_100/slab",
+    "gas_dir": "/path/to/CO_gas_reference",
+    "ads_dir": "/path/to/small_100"
+  },
+  {
+    "name": "CO/211",
+    "surface_dir": "/path/to/small_211/opt_21",
+    "gas_dir": "/path/to/CO_gas_reference",
+    "ads_dir": "/path/to/small_211"
+  },
+  {
+    "name": "CO2/100",
+    "surface_dir": "/path/to/CO2/small_100/slab",
+    "gas_dir": "/path/to/CO2_gas_reference",
+    "ads_dir": "/path/to/CO2/small_100"
+  }
+]
+```
+
+**要点：**
+- 不同吸附质（CO、CO2、H）各自有独立的 `gas_dir`（CO 气相参考 ≠ CO2 气相参考）
+- 同一种吸附质的不同表面可**共享** `gas_dir`（例如 CO 在 100/111/211/stepped 四个表面共用同一个 CO 气相计算目录）
+- `ads_dir` 中的 `opt_*` 目录只需含 `*-pos-1.pdb` 即可；代码会自动排除与 `surface_dir` 或 `gas_dir` 指向相同路径的 opt_ 目录
+
+### 当前可用的 CO 配置文件
+
+已生成，可直接使用：
+
+```
+/home/xysun/work/FTuMLP1/adsdata/benchmark_config_CO.json
+```
+
+该文件定义了 4 个系统：
+
+| name | surface_dir | gas_dir | ads_dir | 站点数 |
+|------|-------------|---------|---------|--------|
+| CO/100 | `small_100/slab` | `small_steped/opt_18` | `small_100` | 14 |
+| CO/111 | `small_111/slab` | `small_steped/opt_18` | `small_111` | 13 |
+| CO/211 | `small_211/opt_21` | `small_steped/opt_18` | `small_211` | 20 |
+| CO/stepped | `small_steped/opt_17` | `small_steped/opt_18` | `small_steped` | 16 |
+
+> **说明：**
+> - `small_100`/`small_111`：表面在各自的 `slab/` 子目录
+> - `small_211`：洁净表面在 `opt_21/`（经验证只含 Rh+Fe，无 C/O），共 20 个 CO+slab 站点（opt_1~opt_20）
+> - `small_steped`：洁净表面在 `opt_17/`，CO 气相在 `opt_18/`，16 个吸附站点（opt_1~opt_16）
+> - 四个表面共用 `small_steped/opt_18` 作为 CO 气相参考
+
+### 训练脚本写法
+
+**多表面模式：**
+
+```bash
+mace_run_train \
+    ...（其他参数不变）...
+    --adsorption_benchmark=True \
+    --adsorption_benchmark_config="/home/xysun/work/FTuMLP1/adsdata/benchmark_config_CO.json" \
+    --adsorption_output_dir="results/adsorption_benchmark" \
+    --adsorption_fmax=0.05 \
+    --adsorption_benchmark_device=cpu
+```
+
+**单表面模式（旧写法，仍然有效）：**
+
+```bash
+mace_run_train \
+    ...
+    --adsorption_benchmark=True \
+    --adsorption_surface_dir="/path/to/opt_17" \
+    --adsorption_gas_dir="/path/to/opt_18" \
+    --adsorption_ads_dir="/path/to/small" \
+    --adsorption_output_dir="results/adsorption_benchmark" \
+    --adsorption_benchmark_device=cpu
+```
+
+### 训练 log 示例（多系统）
+
+```
+═════════════════════════════════════════════════════════════════
+AdsorptionBenchmark — Epoch 3  (4 system(s), 8 combos each)
+
+  ── System: CO/100 ──
+    [slab-dft_gas-dft_sp]   MAE=0.082 eV  RMSE=0.095 eV  Max=0.154 eV
+    ...
+
+  ── System: CO/111 ──
+    [slab-dft_gas-dft_sp]   MAE=0.097 eV  RMSE=0.113 eV  Max=0.189 eV
+    ...
+
+  ── System: CO/211 ──
+    ...
+
+  ── System: CO/stepped ──
+    ...
+
+  ── Epoch 3 Cross-System Summary ──
+  system                combo                                  MAE     RMSE
+  ──────────────────────────────────────────────────────────────────────────
+  CO/100                slab-dft_gas-dft_sp                  0.082    0.095
+  CO/111                slab-dft_gas-dft_sp                  0.097    0.113
+  CO/211                slab-dft_gas-dft_sp                  0.105    0.121
+  CO/stepped            slab-dft_gas-dft_sp                  0.078    0.091
+  ...
+```
+
+### 后续扩展 CO2/H 体系
+
+准备好 DFT 数据后，只需向 JSON 文件追加新条目：
+
+```json
+{
+  "name": "CO2/100",
+  "surface_dir": "/path/to/CO2_data/small_100/slab_or_opt_XX",
+  "gas_dir": "/path/to/CO2_data/gas_CO2_opt_XX",
+  "ads_dir": "/path/to/CO2_data/small_100"
+}
+```
+
+模板文件：`/home/xysun/work/FTuMLP1/adsdata/benchmark_config_CO2_H_template.json`
+
+---
+
 ## 注意事项
 
 1. `fixed=1` 的原子**不参与力损失和验证指标**，与 CP2K 固定原子受力为零的物理含义一致。
@@ -335,3 +539,4 @@ AdsorptionBenchmark — Epoch 3  (8 combos)
 3. 基准测试在 CPU 上运行（`--adsorption_benchmark_device=cpu`），不占用训练 GPU。
 4. `ads_mode=relax` 的 4 种组合会在 CPU 上做 ASE 弛豫，耗时较长；可通过提高 `--eval_interval` 降低调用频率。
 5. EMA 启用时，基准测试使用 EMA 平均后的模型权重。
+6. 多系统模式中，不同吸附质（CO、CO2、H）必须各自提供独立的气相参考目录（`gas_dir`），不可共用。同种吸附质的不同表面可以共用同一个 `gas_dir`。

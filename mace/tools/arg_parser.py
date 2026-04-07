@@ -1102,23 +1102,34 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=False,
     )
     parser.add_argument(
+        "--adsorption_benchmark_config",
+        help="Path to a JSON file defining one or more adsorption benchmark systems. "
+             "Each entry must have keys: name, surface_dir, gas_dir, ads_dir. "
+             "Example: [{\"name\": \"CO/100\", \"surface_dir\": \"...\", "
+             "\"gas_dir\": \"...\", \"ads_dir\": \"...\"}]. "
+             "When provided, takes precedence over --adsorption_surface_dir / "
+             "--adsorption_gas_dir / --adsorption_ads_dir.",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
         "--adsorption_surface_dir",
         help="Directory containing the clean slab CP2K output (*-pos-1.pdb) "
-             "for the adsorption benchmark",
+             "for the adsorption benchmark (single-system mode).",
         type=str,
         default=None,
     )
     parser.add_argument(
         "--adsorption_gas_dir",
         help="Directory containing the gas-phase molecule CP2K output "
-             "for the adsorption benchmark",
+             "for the adsorption benchmark (single-system mode).",
         type=str,
         default=None,
     )
     parser.add_argument(
         "--adsorption_ads_dir",
         help="Directory containing opt_* sub-directories with adsorption "
-             "structure CP2K outputs for the adsorption benchmark",
+             "structure CP2K outputs for the adsorption benchmark (single-system mode).",
         type=str,
         default=None,
     )

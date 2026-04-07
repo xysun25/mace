@@ -8,7 +8,7 @@ import logging
 import re
 from copy import deepcopy
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -414,13 +414,88 @@ def save_parity_plot(df: pd.DataFrame, plot_path: Path) -> None:
         logger.warning(f"Could not save parity plot: {exc}")
 
 
+def save_multi_system_parity_plot(
+    system_dfs: List[Tuple[str, pd.DataFrame]],
+    plot_path: Path,
+    combo_tag: str = "",
+) -> None:
+    """
+    Save a parity plot with one colour per system (surface/adsorbate combination).
+
+    Parameters
+    ----------
+    system_dfs : list of (system_name, DataFrame) tuples
+        Each DataFrame must have columns ``E_ads_dft_eV``, ``E_ads_eV``, ``error_eV``.
+    plot_path : Path
+        Output PNG path.
+    combo_tag : str
+        Short description added to the plot title (e.g. ``slab-dft_gas-dft_sp``).
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(6, 6))
+        all_vals = []
+        for sys_name, df in system_dfs:
+            valid = df.dropna(subset=["error_eV"])
+            if len(valid) == 0:
+                continue
+            sc = ax.scatter(
+                valid["E_ads_dft_eV"],
+                valid["E_ads_eV"],
+                s=40,
+                alpha=0.8,
+                label=sys_name,
+            )
+            all_vals.extend(valid["E_ads_dft_eV"].tolist())
+            all_vals.extend(valid["E_ads_eV"].tolist())
+
+        if not all_vals:
+            plt.close(fig)
+            return
+
+        lims = [min(all_vals) - 0.05, max(all_vals) + 0.05]
+        ax.plot(lims, lims, "k--", linewidth=1)
+        ax.set_xlim(lims)
+        ax.set_ylim(lims)
+        ax.set_xlabel("DFT $E_{ads}$ (eV)")
+        ax.set_ylabel("MACE $E_{ads}$ (eV)")
+
+        # Overall MAE/RMSE across all systems
+        all_errors = pd.concat(
+            [df.dropna(subset=["error_eV"])["error_eV"] for _, df in system_dfs],
+            ignore_index=True,
+        )
+        if len(all_errors) > 0:
+            mae = all_errors.abs().mean()
+            rmse = np.sqrt((all_errors ** 2).mean())
+            title = f"{combo_tag}  MAE={mae:.3f} eV  RMSE={rmse:.3f} eV"
+        else:
+            title = combo_tag
+        ax.set_title(title)
+        ax.legend(fontsize=8, loc="upper left")
+        plt.tight_layout()
+        plt.savefig(str(plot_path), dpi=150)
+        plt.close(fig)
+    except Exception as exc:
+        logger.warning(f"Could not save multi-system parity plot: {exc}")
+
+
 # ─── Callback factory ─────────────────────────────────────────────────────────
 
+def _safe_dirname(name: str) -> str:
+    """Convert a system name like 'CO/100' to a filesystem-safe string 'CO_100'."""
+    return re.sub(r"[^\w\-]", "_", name)
+
+
 def make_adsorption_benchmark_fn(
-    surface_dir: str,
-    gas_dir: str,
-    ads_dir: str,
     output_dir: str,
+    systems: Optional[List[Dict]] = None,
+    surface_dir: Optional[str] = None,
+    gas_dir: Optional[str] = None,
+    ads_dir: Optional[str] = None,
     device: str = "cpu",
     fmax: float = 0.05,
 ):
@@ -428,16 +503,38 @@ def make_adsorption_benchmark_fn(
     Build and return a callback ``fn(epoch, model)`` for
     :func:`mace.tools.train.train` (*adsorption_benchmark_fn*).
 
-    Runs **all 8 combinations** of reference energy source × ads mode:
+    Supports two calling modes:
+
+    **Multi-system mode** (recommended)::
+
+        systems = [
+            {"name": "CO/100", "surface_dir": "...", "gas_dir": "...", "ads_dir": "..."},
+            {"name": "CO/111", "surface_dir": "...", "gas_dir": "...", "ads_dir": "..."},
+            {"name": "CO2/100", "surface_dir": "...", "gas_dir": "...", "ads_dir": "..."},
+        ]
+        fn = make_adsorption_benchmark_fn(systems=systems, output_dir="...")
+
+    **Single-system mode** (backward-compatible)::
+
+        fn = make_adsorption_benchmark_fn(
+            surface_dir="...", gas_dir="...", ads_dir="...", output_dir="..."
+        )
+
+    Each system dict must contain:
+    - ``name``: human-readable label (used in logs, filenames, and plot legends)
+    - ``surface_dir``: directory with the clean slab CP2K output (*-pos-1.pdb)
+    - ``gas_dir``: directory with the gas-molecule CP2K output
+    - ``ads_dir``: directory containing opt_* sub-directories
+
+    Runs **all 8 combinations** of reference energy source × ads mode per system:
       slab_ref ∈ {mlff, dft}  ×  gas_ref ∈ {mlff, dft}  ×  ads_mode ∈ {sp, relax}
 
-    Per epoch, each combination produces:
-    - a CSV  ``adsorption_benchmark_epoch{N}_{combo_tag}.csv``
-    - a PNG  ``adsorption_benchmark_epoch{N}_{combo_tag}.png``
-    All 8 results are also concatenated into
-    ``adsorption_benchmark_epoch{N}_all.csv``.
-
-    Results are logged to the Python ``logging`` system.
+    Per epoch, per system, each combination produces:
+    - ``{output_dir}/{system_name}/adsorption_benchmark_epoch{N}_{combo_tag}.csv``
+    - ``{output_dir}/{system_name}/adsorption_benchmark_epoch{N}_{combo_tag}.png``
+    Per system, all combos are concatenated into ``adsorption_benchmark_epoch{N}_all.csv``.
+    A cross-system parity plot (one colour per system) is saved to the root output_dir
+    for the ``slab-dft_gas-dft_sp`` combination.
     """
     import torch
     from itertools import product as iterproduct
@@ -446,31 +543,69 @@ def make_adsorption_benchmark_fn(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load DFT reference data once at construction time
-    logger.info("AdsorptionBenchmark: loading DFT reference structures …")
-    try:
-        structures, dft_df = load_adsorption_system(
-            surface_dir=Path(surface_dir),
-            gas_dir=Path(gas_dir),
-            ads_dir=Path(ads_dir),
-        )
-    except Exception as exc:
-        logger.error(f"AdsorptionBenchmark: failed to load reference data: {exc}")
-        logger.error("  Adsorption benchmark will be disabled.")
-        return None
+    # ── Normalise to a list of system dicts ──────────────────────────────────
+    if systems is None:
+        if surface_dir is None or gas_dir is None or ads_dir is None:
+            logger.error(
+                "AdsorptionBenchmark: either 'systems' or all of "
+                "'surface_dir', 'gas_dir', 'ads_dir' must be provided."
+            )
+            return None
+        systems = [
+            {
+                "name": "default",
+                "surface_dir": surface_dir,
+                "gas_dir": gas_dir,
+                "ads_dir": ads_dir,
+            }
+        ]
 
-    n_sites = len(structures["adsorption"])
+    # ── Load DFT reference data once at construction time ───────────────────
     logger.info(
-        f"AdsorptionBenchmark: {n_sites} adsorption configs loaded. "
-        f"Output → {output_dir}"
+        f"AdsorptionBenchmark: loading DFT reference structures for "
+        f"{len(systems)} system(s) …"
     )
+    loaded: List[Dict] = []  # [{name, structures, dft_df, out_dir}, ...]
+    for sys_def in systems:
+        name = sys_def.get("name", "unknown")
+        try:
+            structures, dft_df = load_adsorption_system(
+                surface_dir=Path(sys_def["surface_dir"]),
+                gas_dir=Path(sys_def["gas_dir"]),
+                ads_dir=Path(sys_def["ads_dir"]),
+            )
+        except Exception as exc:
+            logger.error(
+                f"  [{name}] Failed to load reference data: {exc} — skipping this system."
+            )
+            continue
+        n_sites = len(structures["adsorption"])
+        sys_out = output_dir / _safe_dirname(name)
+        sys_out.mkdir(parents=True, exist_ok=True)
+        loaded.append(
+            {
+                "name": name,
+                "structures": structures,
+                "dft_df": dft_df,
+                "out_dir": sys_out,
+                "n_sites": n_sites,
+            }
+        )
+        logger.info(f"  [{name}] {n_sites} adsorption configs loaded → {sys_out}")
+
+    if not loaded:
+        logger.error("AdsorptionBenchmark: no systems loaded. Benchmark will be disabled.")
+        return None
 
     # All 8 (slab_ref, gas_ref, ads_mode) combinations
     ALL_COMBOS = list(iterproduct(["mlff", "dft"], ["mlff", "dft"], ["sp", "relax"]))
 
     def _benchmark_fn(epoch: int, model: "torch.nn.Module") -> None:
         logging.info(f"\n{'═'*65}")
-        logging.info(f"AdsorptionBenchmark — Epoch {epoch}  ({len(ALL_COMBOS)} combos)")
+        logging.info(
+            f"AdsorptionBenchmark — Epoch {epoch}  "
+            f"({len(loaded)} system(s), {len(ALL_COMBOS)} combos each)"
+        )
 
         # Build MACECalculator from current in-memory model weights
         try:
@@ -483,63 +618,97 @@ def make_adsorption_benchmark_fn(
             logger.warning(f"  Could not create calculator: {exc}")
             return
 
-        all_dfs = []
-        for slab_ref, gas_ref, ads_mode in ALL_COMBOS:
-            combo_tag = f"slab-{slab_ref}_gas-{gas_ref}_{ads_mode}"
-            try:
-                df = run_adsorption_benchmark(
-                    calc=calc,
-                    structures=structures,
-                    dft_df=dft_df,
-                    model_name=f"mace_epoch{epoch}_{combo_tag}",
-                    fmax=fmax,
-                    slab_ref=slab_ref,
-                    gas_ref=gas_ref,
-                    ads_mode=ads_mode,
-                )
-            except Exception as exc:
-                logger.warning(f"  Combo {combo_tag} failed: {exc}")
+        # combo_tag → list of (system_name, df) for cross-system plots
+        combo_system_dfs: Dict[str, List[Tuple[str, pd.DataFrame]]] = {}
+
+        for sys_info in loaded:
+            sys_name = sys_info["name"]
+            structures = sys_info["structures"]
+            dft_df = sys_info["dft_df"]
+            sys_out = sys_info["out_dir"]
+
+            logging.info(f"\n  ── System: {sys_name} ──")
+            sys_dfs = []
+
+            for slab_ref, gas_ref, ads_mode in ALL_COMBOS:
+                combo_tag = f"slab-{slab_ref}_gas-{gas_ref}_{ads_mode}"
+                try:
+                    df = run_adsorption_benchmark(
+                        calc=calc,
+                        structures=structures,
+                        dft_df=dft_df,
+                        model_name=f"mace_epoch{epoch}_{combo_tag}",
+                        fmax=fmax,
+                        slab_ref=slab_ref,
+                        gas_ref=gas_ref,
+                        ads_mode=ads_mode,
+                    )
+                except Exception as exc:
+                    logger.warning(f"    [{sys_name}] Combo {combo_tag} failed: {exc}")
+                    continue
+
+                df["system"] = sys_name
+
+                valid = df.dropna(subset=["error_eV"])
+                if len(valid) > 0:
+                    mae = valid["error_eV"].abs().mean()
+                    rmse = np.sqrt((valid["error_eV"] ** 2).mean())
+                    max_err = valid["error_eV"].abs().max()
+                    logging.info(
+                        f"    [{combo_tag}]  "
+                        f"MAE={mae:.3f} eV  RMSE={rmse:.3f} eV  Max={max_err:.3f} eV"
+                    )
+
+                # Per-system per-combo CSV and plot
+                csv_path = sys_out / f"adsorption_benchmark_epoch{epoch:04d}_{combo_tag}.csv"
+                df.to_csv(csv_path, index=False)
+                plot_path = sys_out / f"adsorption_benchmark_epoch{epoch:04d}_{combo_tag}.png"
+                save_parity_plot(df, plot_path)
+
+                sys_dfs.append(df)
+                combo_system_dfs.setdefault(combo_tag, []).append((sys_name, df))
+
+            if not sys_dfs:
                 continue
 
-            valid = df.dropna(subset=["error_eV"])
-            if len(valid) > 0:
-                mae = valid["error_eV"].abs().mean()
-                rmse = np.sqrt((valid["error_eV"] ** 2).mean())
-                max_err = valid["error_eV"].abs().max()
-                logging.info(
-                    f"  [{combo_tag}]  "
-                    f"MAE={mae:.3f} eV  RMSE={rmse:.3f} eV  Max={max_err:.3f} eV"
-                )
+            # Per-system combined CSV
+            sys_combined = pd.concat(sys_dfs, ignore_index=True)
+            sys_combined.to_csv(
+                sys_out / f"adsorption_benchmark_epoch{epoch:04d}_all.csv", index=False
+            )
 
-            # Save per-combo CSV
-            csv_path = output_dir / f"adsorption_benchmark_epoch{epoch:04d}_{combo_tag}.csv"
-            df.to_csv(csv_path, index=False)
-
-            # Save per-combo parity plot
-            plot_path = output_dir / f"adsorption_benchmark_epoch{epoch:04d}_{combo_tag}.png"
-            save_parity_plot(df, plot_path)
-
-            all_dfs.append(df)
-
-        if not all_dfs:
+        if not combo_system_dfs:
             return
 
-        # Grand summary: one row per combo with MAE/RMSE
-        logging.info(f"\n  ── Epoch {epoch} Summary ──")
-        logging.info(f"  {'combo':<35}  {'MAE':>7}  {'RMSE':>7}")
-        logging.info("  " + "-" * 55)
-        for df in all_dfs:
-            valid = df.dropna(subset=["error_eV"])
-            combo_tag = df["model"].iloc[0].split(f"epoch{epoch}_", 1)[-1]
-            if len(valid) > 0:
-                mae = valid["error_eV"].abs().mean()
-                rmse = np.sqrt((valid["error_eV"] ** 2).mean())
-                logging.info(f"  {combo_tag:<35}  {mae:>7.3f}  {rmse:>7.3f}")
+        # ── Cross-system summary ─────────────────────────────────────────────
+        logging.info(f"\n  ── Epoch {epoch} Cross-System Summary ──")
+        logging.info(f"  {'system':<20}  {'combo':<35}  {'MAE':>7}  {'RMSE':>7}")
+        logging.info("  " + "-" * 70)
 
-        # Combined CSV for all combos
-        combined = pd.concat(all_dfs, ignore_index=True)
-        combined_csv = output_dir / f"adsorption_benchmark_epoch{epoch:04d}_all.csv"
-        combined.to_csv(combined_csv, index=False)
-        logging.info(f"  Combined CSV: {combined_csv.name}")
+        all_epoch_dfs = []
+        for combo_tag, sys_df_pairs in sorted(combo_system_dfs.items()):
+            for sys_name, df in sys_df_pairs:
+                valid = df.dropna(subset=["error_eV"])
+                if len(valid) > 0:
+                    mae = valid["error_eV"].abs().mean()
+                    rmse = np.sqrt((valid["error_eV"] ** 2).mean())
+                    logging.info(
+                        f"  {sys_name:<20}  {combo_tag:<35}  {mae:>7.3f}  {rmse:>7.3f}"
+                    )
+                all_epoch_dfs.append(df)
+
+            # Cross-system parity plot per combo
+            cross_plot = output_dir / f"adsorption_benchmark_epoch{epoch:04d}_{combo_tag}_all_systems.png"
+            save_multi_system_parity_plot(sys_df_pairs, cross_plot, combo_tag=combo_tag)
+
+        # Grand combined CSV (all systems, all combos)
+        if all_epoch_dfs:
+            grand = pd.concat(all_epoch_dfs, ignore_index=True)
+            grand.to_csv(
+                output_dir / f"adsorption_benchmark_epoch{epoch:04d}_all.csv", index=False
+            )
+            logging.info(
+                f"  Grand combined CSV: adsorption_benchmark_epoch{epoch:04d}_all.csv"
+            )
 
     return _benchmark_fn
