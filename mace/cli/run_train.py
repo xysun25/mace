@@ -942,7 +942,7 @@ def run(args) -> None:
 
     # Build adsorption benchmark callback if requested
     adsorption_benchmark_fn = None
-    if getattr(args, "adsorption_benchmark", False):
+    if getattr(args, "adsorption_benchmark", False) or getattr(args, "adsorption_benchmark_config", None) is not None:
         ads_output_dir = getattr(args, "adsorption_output_dir", None)
         if ads_output_dir is None:
             ads_output_dir = str(Path(args.results_dir) / "adsorption_benchmark")
@@ -971,6 +971,9 @@ def run(args) -> None:
                         output_dir=ads_output_dir,
                         device=getattr(args, "adsorption_benchmark_device", "cpu"),
                         fmax=getattr(args, "adsorption_fmax", 0.05),
+                        e_ref_slab=getattr(args, "adsorption_e_ref_slab", 0.0),
+                        e_ref_gas=getattr(args, "adsorption_e_ref_gas", 0.0),
+                        pred_ads=getattr(args, "pred_ads", False),
                     )
             except Exception as exc:
                 logging.warning(
@@ -1003,6 +1006,9 @@ def run(args) -> None:
                     output_dir=ads_output_dir,
                     device=getattr(args, "adsorption_benchmark_device", "cpu"),
                     fmax=getattr(args, "adsorption_fmax", 0.05),
+                    e_ref_slab=getattr(args, "adsorption_e_ref_slab", 0.0),
+                    e_ref_gas=getattr(args, "adsorption_e_ref_gas", 0.0),
+                    pred_ads=getattr(args, "pred_ads", False),
                 )
 
         if adsorption_benchmark_fn is not None:

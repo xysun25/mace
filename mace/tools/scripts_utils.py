@@ -968,6 +968,21 @@ def get_files_with_suffix(dir_path: str, suffix: str) -> List[str]:
     ]
 
 
+def _e0s_key_to_z(key) -> int:
+    """Convert an E0s dict key to atomic number (int).
+
+    Accepts both integer/numeric-string keys (e.g. 29 or '29') and
+    element-symbol keys (e.g. 'Cu').  The foundation model (Materials Project
+    MACE) stores E0s with element-symbol keys, while user-specified E0s may
+    use atomic numbers; this helper normalises both.
+    """
+    try:
+        return int(key)
+    except (ValueError, TypeError):
+        from ase.data import atomic_numbers
+        return atomic_numbers[key]
+
+
 def dict_to_array(input_data, heads):
     if all(isinstance(value, np.ndarray) for value in input_data.values()):
         return np.array([input_data[head] for head in heads])
@@ -977,11 +992,11 @@ def dict_to_array(input_data, heads):
     for inner_dict in input_data.values():
         unique_keys.update(inner_dict.keys())
     unique_keys = list(unique_keys)
-    sorted_keys = sorted([int(key) for key in unique_keys])
+    sorted_keys = sorted([_e0s_key_to_z(key) for key in unique_keys])
     result_array = np.zeros((len(input_data), len(sorted_keys)))
     for _, (head_name, inner_dict) in enumerate(input_data.items()):
         for key, value in inner_dict.items():
-            key_index = sorted_keys.index(int(key))
+            key_index = sorted_keys.index(_e0s_key_to_z(key))
             head_index = heads.index(head_name)
             result_array[head_index][key_index] = value
     return result_array

@@ -1153,6 +1153,36 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default="cpu",
     )
+    parser.add_argument(
+        "--adsorption_e_ref_slab",
+        help="Slab reference energy (eV) subtracted during energy-referenced training. "
+             "When nonzero, this offset is added back to the MLFF prediction of the "
+             "adsorption structure in DFT-reference benchmark modes so that DFT and MLFF "
+             "energies are on the same absolute scale. Default 0.0 (no correction).",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--adsorption_e_ref_gas",
+        help="Gas reference energy (eV) subtracted during energy-referenced training. "
+             "Applied analogously to --adsorption_e_ref_slab for the gas molecule. "
+             "Default 0.0 (no correction).",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--pred_ads",
+        help="When True, the model is trained to directly predict adsorption energies: "
+             "the training data contains only slab+adsorbate structures and "
+             "REF_energy = E_total - E_slab_ref - E_gas_ref (i.e. E_ads). "
+             "In this mode the adsorption benchmark skips all slab/gas MLFF calculations "
+             "and uses model.get_potential_energy(ads_structure) directly as E_ads_mlff. "
+             "Only sp and relax evaluation modes are run (2 combos instead of 8). "
+             "When False (default) the model predicts total energies and the standard "
+             "8-combo benchmark applies.",
+        type=str2bool,
+        default=False,
+    )
     return parser
 
 

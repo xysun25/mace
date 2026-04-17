@@ -282,13 +282,13 @@ def load_adsorption_system(
 
 # ─── MLFF benchmark ────────────────────────────────────────────────────────────
 
-def _relax_atoms(atoms, fmax: float, label: str = "") -> None:
+def _relax_atoms(atoms, fmax: float, label: str = "", max_steps: int = 500) -> None:
     """Run LBFGS relaxation in-place."""
     from ase.optimize import LBFGS
 
     try:
         opt = LBFGS(atoms, logfile=None)
-        opt.run(fmax=fmax)
+        opt.run(fmax=fmax, steps=max_steps)
         logger.debug(f"  Relaxed {label}: {opt.nsteps} steps")
     except Exception as exc:
         logger.warning(f"  Relaxation failed for {label}: {exc}")
@@ -303,6 +303,9 @@ def run_adsorption_benchmark(
     slab_ref: str = "dft",
     gas_ref: str = "dft",
     ads_mode: str = "sp",
+    e_ref_slab: float = 0.0,
+    e_ref_gas: float = 0.0,
+    pred_ads: bool = False,
 ) -> pd.DataFrame:
     """
     Evaluate MACE adsorption energies starting from DFT geometries.
@@ -317,9 +320,58 @@ def run_adsorption_benchmark(
     slab_ref : 'mlff' or 'dft'
     gas_ref  : 'mlff' or 'dft'
     ads_mode : 'relax' or 'sp'
+    e_ref_slab : float
+        Slab reference energy subtracted during energy-referenced training (eV).
+        When nonzero and slab_ref='dft', this offset is added back to the MLFF
+        prediction of the adsorption structure so that DFT and MLFF energies are
+        on the same absolute scale.  Default 0.0 (no correction).
+    e_ref_gas : float
+        Gas reference energy subtracted during energy-referenced training (eV).
+        Applied analogously when gas_ref='dft'.  Default 0.0 (no correction).
+    pred_ads : bool
+        When True the model was trained to directly predict adsorption energies
+        (REF_energy = E_total - E_slab_ref - E_gas_ref in the training data).
+        In this mode E_ads_mlff = model.get_potential_energy(ads_structure)
+        without any slab or gas subtraction; slab_ref, gas_ref, and e_ref_*
+        are ignored.  Default False.
     """
-    relax_ref = ads_mode == "relax"
     relax_ads = ads_mode == "relax"
+    dft_lookup = dict(zip(dft_df["site"], dft_df["E_ads_dft_eV"]))
+    rows = []
+
+    if pred_ads:
+        # ── pred_ads mode: model directly outputs E_ads ───────────────────────
+        # Training target was REF_energy = E_total - E_slab_ref - E_gas_ref,
+        # so get_potential_energy() already returns the adsorption energy.
+        # No slab or gas MLFF evaluation is needed.
+        for cfg in structures["adsorption"]:
+            ads = cfg["atoms"].copy()
+            ads.calc = calc
+            if relax_ads:
+                _relax_atoms(ads, fmax=fmax, label=cfg["opt_dir"])
+            E_ads_mlff = ads.get_potential_energy()
+            E_ads_dft = dft_lookup.get(cfg["site"], np.nan)
+            error = E_ads_mlff - E_ads_dft if not np.isnan(E_ads_dft) else np.nan
+            rows.append(
+                {
+                    "model": model_name,
+                    "opt_dir": cfg["opt_dir"],
+                    "site": cfg["site"],
+                    "slab_ref": "pred_ads",
+                    "gas_ref": "pred_ads",
+                    "ads_mode": ads_mode,
+                    "E_slab_eV": np.nan,
+                    "E_gas_eV": np.nan,
+                    "E_slab_ads_eV": np.nan,
+                    "E_ads_eV": E_ads_mlff,
+                    "E_ads_dft_eV": E_ads_dft,
+                    "error_eV": error,
+                }
+            )
+        return pd.DataFrame(rows)
+
+    # ── Total-energy mode (pred_ads=False, default) ───────────────────────────
+    relax_ref = ads_mode == "relax"
 
     # ── slab reference ────────────────────────────────────────────────────────
     slab_atoms, slab_energy_dft = structures["slab"]
@@ -344,16 +396,18 @@ def run_adsorption_benchmark(
         E_gas = gas.get_potential_energy()
 
     # ── adsorption structures ─────────────────────────────────────────────────
-    dft_lookup = dict(zip(dft_df["site"], dft_df["E_ads_dft_eV"]))
-
-    rows = []
     for cfg in structures["adsorption"]:
         ads = cfg["atoms"].copy()
         ads.calc = calc
         if relax_ads:
             _relax_atoms(ads, fmax=fmax, label=cfg["opt_dir"])
         E_ads_atoms = ads.get_potential_energy()
-        E_ads_mlff = E_ads_atoms - E_slab - E_gas
+        # Energy-referenced training correction:
+        # If the model was trained with shifted targets (e.g. REF_energy = E_total - e_ref_slab - e_ref_gas),
+        # its output is on an E_ads scale rather than absolute total energy.
+        # When mixing with DFT references (absolute scale), add back the offsets so units match.
+        e_offset = (e_ref_slab if slab_ref == "dft" else 0.0) + (e_ref_gas if gas_ref == "dft" else 0.0)
+        E_ads_mlff = (E_ads_atoms + e_offset) - E_slab - E_gas
         E_ads_dft = dft_lookup.get(cfg["site"], np.nan)
         error = E_ads_mlff - E_ads_dft if not np.isnan(E_ads_dft) else np.nan
         rows.append(
@@ -498,6 +552,9 @@ def make_adsorption_benchmark_fn(
     ads_dir: Optional[str] = None,
     device: str = "cpu",
     fmax: float = 0.05,
+    e_ref_slab: float = 0.0,
+    e_ref_gas: float = 0.0,
+    pred_ads: bool = False,
 ):
     """
     Build and return a callback ``fn(epoch, model)`` for
@@ -597,8 +654,13 @@ def make_adsorption_benchmark_fn(
         logger.error("AdsorptionBenchmark: no systems loaded. Benchmark will be disabled.")
         return None
 
-    # All 8 (slab_ref, gas_ref, ads_mode) combinations
-    ALL_COMBOS = list(iterproduct(["mlff", "dft"], ["mlff", "dft"], ["sp", "relax"]))
+    # Benchmark combinations:
+    # pred_ads=True  → model directly outputs E_ads, only sp/relax vary (2 combos)
+    # pred_ads=False → model outputs total energy, all 8 combinations apply
+    if pred_ads:
+        ALL_COMBOS = [("pred_ads", "pred_ads", mode) for mode in ["sp", "relax"]]
+    else:
+        ALL_COMBOS = list(iterproduct(["mlff", "dft"], ["mlff", "dft"], ["sp", "relax"]))
 
     def _benchmark_fn(epoch: int, model: "torch.nn.Module") -> None:
         logging.info(f"\n{'═'*65}")
@@ -631,7 +693,10 @@ def make_adsorption_benchmark_fn(
             sys_dfs = []
 
             for slab_ref, gas_ref, ads_mode in ALL_COMBOS:
-                combo_tag = f"slab-{slab_ref}_gas-{gas_ref}_{ads_mode}"
+                if slab_ref == "pred_ads":
+                    combo_tag = f"pred_ads_{ads_mode}"
+                else:
+                    combo_tag = f"slab-{slab_ref}_gas-{gas_ref}_{ads_mode}"
                 try:
                     df = run_adsorption_benchmark(
                         calc=calc,
@@ -642,6 +707,9 @@ def make_adsorption_benchmark_fn(
                         slab_ref=slab_ref,
                         gas_ref=gas_ref,
                         ads_mode=ads_mode,
+                        e_ref_slab=e_ref_slab,
+                        e_ref_gas=e_ref_gas,
+                        pred_ads=pred_ads,
                     )
                 except Exception as exc:
                     logger.warning(f"    [{sys_name}] Combo {combo_tag} failed: {exc}")
