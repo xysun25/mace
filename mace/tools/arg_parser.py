@@ -1183,6 +1183,16 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=str2bool,
         default=False,
     )
+    parser.add_argument(
+        "--adsorption_combos",
+        help="Comma-separated list of benchmark combinations to run, restricting the "
+             "default full set. Each tag has the form 'slab-{mlff,dft}_gas-{mlff,dft}_{sp,relax}' "
+             "(or 'pred_ads_{sp,relax}' when --pred_ads is set). "
+             "Example: --adsorption_combos=slab-dft_gas-dft_sp runs only that single combo. "
+             "Default None runs all combos (8 normally, 2 in pred_ads mode).",
+        type=str,
+        default=None,
+    )
     return parser
 
 

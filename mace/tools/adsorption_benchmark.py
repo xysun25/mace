@@ -154,10 +154,50 @@ def _resolve_structure_dir(top_dir: Path) -> Path:
     raise RuntimeError(f"No *-pos-1.pdb found under {top_dir}")
 
 
+def _normalize_gas_refs(sys_def: Dict) -> List[Tuple[Path, float]]:
+    """
+    Normalise a system-config dict into a list of ``(gas_dir, coef)`` terms.
+
+    The gas reference energy is ``Σ coef_i · E(gas_i)``, which lets an
+    adsorbate be referenced to a linear combination of gas molecules
+    (e.g. COOH → CO₂ + ½·H₂) and applies fractional coefficients
+    (e.g. atomic H → ½·H₂).
+
+    Supported config forms:
+
+    - Single term::
+
+        {"gas_dir": ".../CO2_gas", "gas_coef": 1.0}   # gas_coef defaults to 1.0
+
+    - Multiple terms::
+
+        {"gas_refs": [{"gas_dir": ".../CO2_gas", "coef": 1.0},
+                      {"gas_dir": ".../H_gas",   "coef": 0.5}]}
+
+      (each term accepts ``gas_dir``/``dir`` and ``coef``/``gas_coef``.)
+    """
+    refs = sys_def.get("gas_refs")
+    if refs:
+        out: List[Tuple[Path, float]] = []
+        for g in refs:
+            d = g.get("gas_dir", g.get("dir"))
+            if d is None:
+                raise ValueError(f"gas_refs entry missing 'gas_dir': {g!r}")
+            c = g.get("coef", g.get("gas_coef", 1.0))
+            out.append((Path(d), float(c)))
+        return out
+    if sys_def.get("gas_dir"):
+        return [(Path(sys_def["gas_dir"]), float(sys_def.get("gas_coef", 1.0)))]
+    raise ValueError(
+        "system config must provide either 'gas_dir' (optionally with "
+        "'gas_coef') or 'gas_refs'"
+    )
+
+
 def load_adsorption_system(
     surface_dir: Path,
-    gas_dir: Path,
     ads_dir: Path,
+    gas_refs: List[Tuple[Path, float]],
 ):
     """
     Load DFT structures and compute reference adsorption energies.
@@ -173,18 +213,23 @@ def load_adsorption_system(
     surface_dir : Path
         Directory (or parent of opt_*) containing the clean slab *-pos-1.pdb
         and optionally a CP2K *.inp file.
-    gas_dir : Path
-        Directory (or parent of opt_*) containing the gas-molecule *-pos-1.pdb.
     ads_dir : Path
         Directory containing opt_* sub-directories, each with a *-pos-1.pdb
         and optionally a CP2K *.inp.
+    gas_refs : list of (Path, float)
+        One or more ``(gas_dir, coef)`` terms.  The gas reference energy is
+        ``Σ coef_i · E(gas_i)``.  Use a single term with coef 1.0 for a plain
+        molecular reference, a fractional coef for atomic references
+        (½·H₂ for adsorbed H), or several terms for a composite reference
+        (CO₂ + ½·H₂ for COOH).  Build this with :func:`_normalize_gas_refs`.
 
     Returns
     -------
     structures : dict
-        "slab"       : (Atoms, float)
-        "gas"        : (Atoms, float)
-        "adsorption" : list of dicts {opt_dir, site, atoms, energy}
+        "slab"           : (Atoms, float)
+        "gas"            : list of {atoms, energy, coef, dir}  (per gas term)
+        "gas_energy_dft" : float  (Σ coef · E_DFT over all gas terms)
+        "adsorption"     : list of dicts {opt_dir, site, atoms, energy}
     dft_df : pd.DataFrame
         Columns: opt_dir, site, E_slab_ads_eV, E_slab_eV, E_gas_eV, E_ads_dft_eV
     """
@@ -192,7 +237,6 @@ def load_adsorption_system(
     from ase.io import read as ase_read
 
     surface_dir = Path(surface_dir)
-    gas_dir = Path(gas_dir)
     ads_dir = Path(ads_dir)
 
     # ── Load surface/slab ────────────────────────────────────────────────────
@@ -211,19 +255,35 @@ def load_adsorption_system(
         f"E_DFT={slab_energy:.4f} eV"
     )
 
-    # ── Load gas molecule ────────────────────────────────────────────────────
-    gas_struct_dir = _resolve_structure_dir(gas_dir)
-    gas_pdb = _find_pdb(gas_struct_dir)
-    gas_energy = extract_cp2k_pdb_energy(gas_pdb)
-    gas_atoms = ase_read(str(gas_pdb), index=-1)
-    logger.info(
-        f"Gas: {gas_atoms.get_chemical_formula()}, "
-        f"E_DFT={gas_energy:.4f} eV"
-    )
+    # ── Load gas reference(s) ─────────────────────────────────────────────────
+    # The reference energy is Σ coef_i · E(gas_i); a single term with coef 1.0
+    # reproduces a plain molecular reference, while fractional coefficients and
+    # multiple terms express atomic (½·H₂) or composite (CO₂ + ½·H₂) references.
+    gas_terms: List[Dict] = []
+    gas_energy = 0.0
+    for gdir, coef in gas_refs:
+        gas_struct_dir = _resolve_structure_dir(Path(gdir))
+        gas_pdb = _find_pdb(gas_struct_dir)
+        term_energy = extract_cp2k_pdb_energy(gas_pdb)
+        term_atoms = ase_read(str(gas_pdb), index=-1)
+        gas_terms.append(
+            {
+                "atoms": term_atoms,
+                "energy": term_energy,
+                "coef": coef,
+                "dir": gas_struct_dir,
+            }
+        )
+        gas_energy += coef * term_energy
+        logger.info(
+            f"Gas term: {coef:g} × {term_atoms.get_chemical_formula()}, "
+            f"E_DFT={term_energy:.4f} eV"
+        )
+    logger.info(f"Gas reference total: E_DFT={gas_energy:.4f} eV")
 
     # ── Load adsorption structures ───────────────────────────────────────────
     # Exclude the surface and gas directories in case ads_dir is their parent
-    exclude = {slab_dir.resolve(), gas_struct_dir.resolve()}
+    exclude = {slab_dir.resolve()} | {t["dir"].resolve() for t in gas_terms}
     opt_dirs = sorted(
         [
             d for d in ads_dir.iterdir()
@@ -259,7 +319,8 @@ def load_adsorption_system(
 
     structures = {
         "slab": (slab_atoms, slab_energy),
-        "gas": (gas_atoms, gas_energy),
+        "gas": gas_terms,
+        "gas_energy_dft": gas_energy,
         "adsorption": adsorption_configs,
     }
 
@@ -384,16 +445,18 @@ def run_adsorption_benchmark(
             _relax_atoms(slab, fmax=fmax, label="slab")
         E_slab = slab.get_potential_energy()
 
-    # ── gas reference ─────────────────────────────────────────────────────────
-    gas_atoms, gas_energy_dft = structures["gas"]
+    # ── gas reference (Σ coef · E over all gas terms) ─────────────────────────
+    gas_terms = structures["gas"]
     if gas_ref == "dft":
-        E_gas = gas_energy_dft
+        E_gas = structures["gas_energy_dft"]
     else:
-        gas = gas_atoms.copy()
-        gas.calc = calc
-        if relax_ref:
-            _relax_atoms(gas, fmax=fmax, label="gas")
-        E_gas = gas.get_potential_energy()
+        E_gas = 0.0
+        for term in gas_terms:
+            gas = term["atoms"].copy()
+            gas.calc = calc
+            if relax_ref:
+                _relax_atoms(gas, fmax=fmax, label="gas")
+            E_gas += term["coef"] * gas.get_potential_energy()
 
     # ── adsorption structures ─────────────────────────────────────────────────
     for cfg in structures["adsorption"]:
@@ -555,6 +618,7 @@ def make_adsorption_benchmark_fn(
     e_ref_slab: float = 0.0,
     e_ref_gas: float = 0.0,
     pred_ads: bool = False,
+    combos: Optional[List[str]] = None,
 ):
     """
     Build and return a callback ``fn(epoch, model)`` for
@@ -580,8 +644,14 @@ def make_adsorption_benchmark_fn(
     Each system dict must contain:
     - ``name``: human-readable label (used in logs, filenames, and plot legends)
     - ``surface_dir``: directory with the clean slab CP2K output (*-pos-1.pdb)
-    - ``gas_dir``: directory with the gas-molecule CP2K output
     - ``ads_dir``: directory containing opt_* sub-directories
+    - the gas reference, given either as:
+        * ``gas_dir`` (single molecule) with optional ``gas_coef`` (default 1.0),
+          e.g. ``{"gas_dir": ".../H_gas", "gas_coef": 0.5}`` for atomic H → ½·H₂; or
+        * ``gas_refs``: a list of terms for a composite reference, e.g.
+          ``{"gas_refs": [{"gas_dir": ".../CO2_gas", "coef": 1.0},
+                          {"gas_dir": ".../H_gas",   "coef": 0.5}]}`` for COOH → CO₂ + ½·H₂.
+      The reference energy is ``Σ coef_i · E(gas_i)`` (see :func:`_normalize_gas_refs`).
 
     Runs **all 8 combinations** of reference energy source × ads mode per system:
       slab_ref ∈ {mlff, dft}  ×  gas_ref ∈ {mlff, dft}  ×  ads_mode ∈ {sp, relax}
@@ -628,8 +698,8 @@ def make_adsorption_benchmark_fn(
         try:
             structures, dft_df = load_adsorption_system(
                 surface_dir=Path(sys_def["surface_dir"]),
-                gas_dir=Path(sys_def["gas_dir"]),
                 ads_dir=Path(sys_def["ads_dir"]),
+                gas_refs=_normalize_gas_refs(sys_def),
             )
         except Exception as exc:
             logger.error(
@@ -662,6 +732,33 @@ def make_adsorption_benchmark_fn(
     else:
         ALL_COMBOS = list(iterproduct(["mlff", "dft"], ["mlff", "dft"], ["sp", "relax"]))
 
+    def _combo_tag(slab_ref, gas_ref, ads_mode):
+        if slab_ref == "pred_ads":
+            return f"pred_ads_{ads_mode}"
+        return f"slab-{slab_ref}_gas-{gas_ref}_{ads_mode}"
+
+    # Optionally restrict to a user-requested subset of combos
+    if combos:
+        requested = {c.strip() for c in combos if c and c.strip()}
+        available = {_combo_tag(*c): c for c in ALL_COMBOS}
+        unknown = requested - set(available)
+        if unknown:
+            logger.warning(
+                f"AdsorptionBenchmark: ignoring unknown combo tag(s) {sorted(unknown)}; "
+                f"available: {sorted(available)}"
+            )
+        selected = [available[t] for t in requested if t in available]
+        if selected:
+            ALL_COMBOS = selected
+            logger.info(
+                f"AdsorptionBenchmark: restricted to {len(ALL_COMBOS)} combo(s): "
+                f"{[_combo_tag(*c) for c in ALL_COMBOS]}"
+            )
+        else:
+            logger.warning(
+                "AdsorptionBenchmark: no requested combos matched; running all combos."
+            )
+
     def _benchmark_fn(epoch: int, model: "torch.nn.Module") -> None:
         logging.info(f"\n{'═'*65}")
         logging.info(
@@ -693,10 +790,7 @@ def make_adsorption_benchmark_fn(
             sys_dfs = []
 
             for slab_ref, gas_ref, ads_mode in ALL_COMBOS:
-                if slab_ref == "pred_ads":
-                    combo_tag = f"pred_ads_{ads_mode}"
-                else:
-                    combo_tag = f"slab-{slab_ref}_gas-{gas_ref}_{ads_mode}"
+                combo_tag = _combo_tag(slab_ref, gas_ref, ads_mode)
                 try:
                     df = run_adsorption_benchmark(
                         calc=calc,

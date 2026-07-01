@@ -941,6 +941,13 @@ def run(args) -> None:
             )
 
     # Build adsorption benchmark callback if requested
+    def _parse_adsorption_combos(spec):
+        """Split a comma-separated --adsorption_combos string into a list of tags (or None)."""
+        if not spec:
+            return None
+        tags = [t.strip() for t in spec.split(",") if t.strip()]
+        return tags or None
+
     adsorption_benchmark_fn = None
     if getattr(args, "adsorption_benchmark", False) or getattr(args, "adsorption_benchmark_config", None) is not None:
         ads_output_dir = getattr(args, "adsorption_output_dir", None)
@@ -954,16 +961,18 @@ def run(args) -> None:
             try:
                 with open(config_path) as f:
                     systems = json.load(f)
-                required_keys = {"name", "surface_dir", "gas_dir", "ads_dir"}
+                required_keys = {"name", "surface_dir", "ads_dir"}
+                # A gas reference may be given as a single 'gas_dir' or a composite 'gas_refs' list.
                 bad = [
                     s.get("name", f"entry#{i}")
                     for i, s in enumerate(systems)
-                    if not required_keys.issubset(s)
+                    if not required_keys.issubset(s) or not (s.get("gas_dir") or s.get("gas_refs"))
                 ]
                 if bad:
                     logging.warning(
                         f"Adsorption benchmark config: entries missing required keys "
-                        f"(name/surface_dir/gas_dir/ads_dir): {bad}. Benchmark will be disabled."
+                        f"(name/surface_dir/ads_dir and one of gas_dir/gas_refs): {bad}. "
+                        "Benchmark will be disabled."
                     )
                 else:
                     adsorption_benchmark_fn = make_adsorption_benchmark_fn(
@@ -974,6 +983,7 @@ def run(args) -> None:
                         e_ref_slab=getattr(args, "adsorption_e_ref_slab", 0.0),
                         e_ref_gas=getattr(args, "adsorption_e_ref_gas", 0.0),
                         pred_ads=getattr(args, "pred_ads", False),
+                        combos=_parse_adsorption_combos(getattr(args, "adsorption_combos", None)),
                     )
             except Exception as exc:
                 logging.warning(
@@ -1009,6 +1019,7 @@ def run(args) -> None:
                     e_ref_slab=getattr(args, "adsorption_e_ref_slab", 0.0),
                     e_ref_gas=getattr(args, "adsorption_e_ref_gas", 0.0),
                     pred_ads=getattr(args, "pred_ads", False),
+                    combos=_parse_adsorption_combos(getattr(args, "adsorption_combos", None)),
                 )
 
         if adsorption_benchmark_fn is not None:
